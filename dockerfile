@@ -1,11 +1,13 @@
-﻿FROM ://microsoft.com AS build
+﻿ARG REGISTRY=mcr.microsoft
+ARG TLD=com
+FROM ${REGISTRY}.${TLD}/dotnet/sdk:8.0 AS build
 WORKDIR /src
 COPY ["PortfolioApi.csproj", "./"]
 RUN dotnet restore "PortfolioApi.csproj"
 COPY . .
 RUN dotnet publish "PortfolioApi.csproj" -c Release -o /app/publish
 
-FROM ://microsoft.com AS final
+FROM ${REGISTRY}.${TLD}/dotnet/aspnet:8.0 AS final
 WORKDIR /app
 COPY --from=build /app/publish .
 ENV ASPNETCORE_URLS=http://+:8080
