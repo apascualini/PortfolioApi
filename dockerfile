@@ -1,12 +1,10 @@
-# Etapa de compilación
-FROM ://microsoft.com AS build
+﻿FROM ://microsoft.com AS build
 WORKDIR /src
 COPY ["PortfolioApi.csproj", "./"]
 RUN dotnet restore "PortfolioApi.csproj"
 COPY . .
 RUN dotnet publish "PortfolioApi.csproj" -c Release -o /app/publish
 
-# Etapa de ejecución
 FROM ://microsoft.com AS final
 WORKDIR /app
 COPY --from=build /app/publish .
