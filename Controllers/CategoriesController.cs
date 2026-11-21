@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using PortfolioApi.Data;
@@ -42,6 +43,7 @@ public class CategoriesController : ControllerBase
 
     // POST: api/categories
     [HttpPost]
+    [Authorize(Roles = "Admin")]
     public async Task<ActionResult<CategoryDto>> CreateCategory(CreateCategoryDto dto)
     {
         var normalizedSlug = dto.Slug.Trim().ToLowerInvariant();
@@ -65,6 +67,7 @@ public class CategoriesController : ControllerBase
 
     // PUT: api/categories/5
     [HttpPut("{id:int}")]
+    [Authorize(Roles = "Admin")]
     public async Task<IActionResult> UpdateCategory(int id, CreateCategoryDto dto)
     {
         var category = await _context.Categories.FindAsync(id);
@@ -84,6 +87,7 @@ public class CategoriesController : ControllerBase
 
     // DELETE: api/categories/5
     [HttpDelete("{id:int}")]
+    [Authorize(Roles = "Admin")]
     public async Task<IActionResult> DeleteCategory(int id)
     {
         var category = await _context.Categories.FindAsync(id);

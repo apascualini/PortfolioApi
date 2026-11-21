@@ -14,6 +14,9 @@ public class AppDbContext : DbContext
     public DbSet<Order> Orders => Set<Order>();
     public DbSet<OrderItem> OrderItems => Set<OrderItem>();
 
+    public DbSet<AdminUser> AdminUsers => Set<AdminUser>();
+
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -24,6 +27,11 @@ public class AppDbContext : DbContext
 
         modelBuilder.Entity<Order>()
             .HasIndex(o => o.MercadoPagoPreferenceId);
+
+        modelBuilder.Entity<AdminUser>()
+            .HasIndex(u => u.Email)
+            .IsUnique();
+
     }
 
 }
