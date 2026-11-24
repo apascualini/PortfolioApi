@@ -113,12 +113,15 @@ public class CheckoutController : ControllerBase
         await _context.SaveChangesAsync();
 
         // 2. Construir el payload oficial para POST https://api.mercadopago.com/v1/orders
-        var frontendUrl = _config["FrontendUrl"] ?? "http://localhost:5173";
+        var configuredFrontend = _config["FrontendUrl"] ?? "";
+        var safeFrontendUrl = configuredFrontend.Contains("localhost") || string.IsNullOrWhiteSpace(configuredFrontend)
+            ? "https://vercel.app"
+            : configuredFrontend.TrimEnd('/');
 
         var mpPayload = new
         {
             type = "online",
-            processing_mode = "automatic",
+            processing_mode = "manual", // Obligatorio "manual" para Checkout Pro (devuelve checkout_url)
             total_amount = totalAmount.ToString("F2", CultureInfo.InvariantCulture),
             external_reference = order.Id.ToString(),
             description = $"Pedido #{order.Id}",
@@ -127,13 +130,16 @@ public class CheckoutController : ControllerBase
                 email = order.CustomerEmail
             },
             items = mpItems,
-            back_urls = new
+            config = new
             {
-                success = $"{frontendUrl}/checkout/success?orderId={order.Id}",
-                failure = $"{frontendUrl}/checkout/failure?orderId={order.Id}",
-                pending = $"{frontendUrl}/checkout/pending?orderId={order.Id}"
-            },
-            auto_return = "approved"
+                online = new
+                {
+                    success_url = $"{safeFrontendUrl}/checkout/success?orderId={order.Id}",
+                    failure_url = $"{safeFrontendUrl}/checkout/failure?orderId={order.Id}",
+                    pending_url = $"{safeFrontendUrl}/checkout/pending?orderId={order.Id}",
+                    auto_return = "approved"
+                }
+            }
         };
 
         var client = _httpClientFactory.CreateClient();
@@ -168,106 +174,114 @@ public class CheckoutController : ControllerBase
         return Ok(new CheckoutResponse(order.Id, mpOrderId, checkoutUrl));
     }
 
+
     // POST: api/checkout/webhook
     [HttpPost("webhook")]
-    public async Task<IActionResult> Webhook([FromBody] JsonElement body)
+    public async Task<IActionResult> Webhook(
+        [FromQuery] string? type,
+        [FromQuery] string? topic,
+        [FromQuery] string? id,
+        [FromQuery(Name = "data.id")] string? dataId)
     {
         var accessToken = _config["MercadoPago:AccessToken"];
         if (string.IsNullOrEmpty(accessToken))
             return StatusCode(500);
 
-        // En Orders API, las notificaciones llegan con type = "order" (o topic = "order") y data.id = "ORD..."
-        string? eventType = null;
-        string? mpOrderId = null;
+        using var reader = new StreamReader(Request.Body);
+        var rawBody = await reader.ReadToEndAsync();
+        _logger.LogInformation("Webhook MP recibido. Query: {Query} | Body: {Body}", Request.QueryString, rawBody);
 
-        if (body.ValueKind == JsonValueKind.Object)
+        string? eventType = type ?? topic;
+        string? mpOrderId = dataId ?? id;
+
+        if (!string.IsNullOrWhiteSpace(rawBody))
         {
-            if (body.TryGetProperty("type", out var typeProp))
-                eventType = typeProp.GetString();
-            else if (body.TryGetProperty("topic", out var topicProp))
-                eventType = topicProp.GetString();
-
-            if (body.TryGetProperty("data", out var dataProp) &&
-                dataProp.TryGetProperty("id", out var idProp))
+            try
             {
-                mpOrderId = idProp.GetString();
+                using var bodyDoc = JsonDocument.Parse(rawBody);
+                var rootBody = bodyDoc.RootElement;
+
+                if (string.IsNullOrEmpty(eventType))
+                {
+                    if (rootBody.TryGetProperty("type", out var t)) eventType = t.GetString();
+                    else if (rootBody.TryGetProperty("topic", out var top)) eventType = top.GetString();
+                }
+
+                if (string.IsNullOrEmpty(mpOrderId) &&
+                    rootBody.TryGetProperty("data", out var d) &&
+                    d.TryGetProperty("id", out var dId))
+                {
+                    mpOrderId = dId.GetString();
+                }
             }
+            catch { /* Ignorar si el body no es JSON */ }
         }
 
         if (eventType != "order" || string.IsNullOrWhiteSpace(mpOrderId))
             return Ok();
 
-        try
-        {
-            // Consultar el estado real de la Order directamente en Mercado Pago: GET /v1/orders/{id}
-            var client = _httpClientFactory.CreateClient();
-            using var getReq = new HttpRequestMessage(HttpMethod.Get, $"https://mercadopago.com{mpOrderId}");
-            getReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
-
-            var mpRes = await client.SendAsync(getReq);
-            if (!mpRes.IsSuccessStatusCode)
-            {
-                _logger.LogWarning("No se pudo consultar la order {MpOrderId} en Mercado Pago.", mpOrderId);
-                return Ok();
-            }
-
-            var mpJson = await mpRes.Content.ReadAsStringAsync();
-            using var doc = JsonDocument.Parse(mpJson);
-            var root = doc.RootElement;
-
-            var status = root.GetProperty("status").GetString(); // ej: "processed", "paid", "failed", "canceled"
-            var externalRef = root.TryGetProperty("external_reference", out var extProp)
-                ? extProp.GetString()
-                : null;
-
-            if (!int.TryParse(externalRef, out var orderId))
-                return Ok();
-
-            await using var transaction = await _context.Database.BeginTransactionAsync();
-
-            var order = await _context.Orders
-                .Include(o => o.Items)
-                .FirstOrDefaultAsync(o => o.Id == orderId);
-
-            if (order is null || order.Status == "Approved")
-                return Ok();
-
-            // Extraer el ID del pago interno dentro de transactions.payments[0].id si existe
-            if (root.TryGetProperty("transactions", out var txProp) &&
-                txProp.TryGetProperty("payments", out var paymentsArr) &&
-                paymentsArr.ValueKind == JsonValueKind.Array &&
-                paymentsArr.GetArrayLength() > 0)
-            {
-                order.MercadoPagoPaymentId = paymentsArr[0].GetProperty("id").GetString();
-            }
-
-            // En Orders API, una orden cobrada exitosamente tiene status "processed" o "paid"
-            if (status is "processed" or "paid")
-            {
-                order.Status = "Approved";
-
-                foreach (var item in order.Items)
-                {
-                    var product = await _context.Products.FindAsync(item.ProductId);
-
-                    if (product is not null)
-                    {
-                        product.Stock = Math.Max(0, product.Stock - item.Quantity);
-                    }
-                }
-            }
-            else if (status is "failed" or "canceled" or "expired")
-            {
-                order.Status = "Rejected";
-            }
-            await _context.SaveChangesAsync();
-            await transaction.CommitAsync();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error procesando webhook de Orders API para {MpOrderId}", mpOrderId);
-            return StatusCode(500);
-        }
+        await SyncOrderWithMercadoPago(mpOrderId, accessToken);
         return Ok();
     }
+
+    private async Task SyncOrderWithMercadoPago(string mpOrderId, string accessToken)
+    {
+        var client = _httpClientFactory.CreateClient();
+        using var getReq = new HttpRequestMessage(HttpMethod.Get, $"https://mercadopago.com{mpOrderId}");
+        getReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+
+        var mpRes = await client.SendAsync(getReq);
+        var mpJson = await mpRes.Content.ReadAsStringAsync();
+
+        if (!mpRes.IsSuccessStatusCode)
+        {
+            _logger.LogWarning("Error consultando order {MpOrderId}: {Response}", mpOrderId, mpJson);
+            return;
+        }
+
+        using var doc = JsonDocument.Parse(mpJson);
+        var root = doc.RootElement;
+
+        var status = root.GetProperty("status").GetString();
+        var externalRef = root.TryGetProperty("external_reference", out var extProp) ? extProp.GetString() : null;
+
+        if (!int.TryParse(externalRef, out var orderId))
+            return;
+
+        await using var transaction = await _context.Database.BeginTransactionAsync();
+
+        var order = await _context.Orders
+            .Include(o => o.Items)
+            .FirstOrDefaultAsync(o => o.Id == orderId);
+
+        if (order is null || order.Status == "Approved")
+            return;
+
+        if (root.TryGetProperty("transactions", out var txProp) &&
+            txProp.TryGetProperty("payments", out var paymentsArr) &&
+            paymentsArr.ValueKind == JsonValueKind.Array &&
+            paymentsArr.GetArrayLength() > 0)
+        {
+            order.MercadoPagoPaymentId = paymentsArr[0].GetProperty("id").GetString();
+        }
+
+        if (status is "processed" or "paid")
+        {
+            order.Status = "Approved";
+            foreach (var item in order.Items)
+            {
+                var product = await _context.Products.FindAsync(item.ProductId);
+                if (product is not null)
+                    product.Stock = Math.Max(0, product.Stock - item.Quantity);
+            }
+        }
+        else if (status is "failed" or "canceled" or "expired")
+        {
+            order.Status = "Rejected";
+        }
+
+        await _context.SaveChangesAsync();
+        await transaction.CommitAsync();
+    }
+
 }
