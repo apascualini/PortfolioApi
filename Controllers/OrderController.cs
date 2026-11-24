@@ -178,12 +178,13 @@ public class OrdersController : ControllerBase
         return Ok(new { id = order.Id, status = order.Status });
     }
 
-    // GET: api/orders/5/public?email=cliente@mail.com
-    // Público (para la pantalla /checkout/success en React): valida el email para evitar enumeración de pedidos
+
     [HttpGet("{id:int}/public")]
     public async Task<ActionResult<PublicOrderStatusDto>> GetPublicOrderStatus(
         int id,
-        [FromQuery] string email)
+        [FromQuery] string email,
+        [FromServices] IConfiguration config,
+        [FromServices] IHttpClientFactory httpClientFactory)
     {
         if (string.IsNullOrWhiteSpace(email))
             return BadRequest(new { message = "El email es requerido para consultar el pedido." });
@@ -191,13 +192,44 @@ public class OrdersController : ControllerBase
         var normalizedEmail = email.Trim().ToLowerInvariant();
 
         var order = await _context.Orders
-            .AsNoTracking()
             .Include(o => o.Items)
                 .ThenInclude(i => i.Product)
             .FirstOrDefaultAsync(o => o.Id == id && o.CustomerEmail == normalizedEmail);
 
         if (order is null)
             return NotFound(new { message = "Pedido no encontrado." });
+
+        // Fallback: if still Pending, verify directly with Mercado Pago API right now
+        if (order.Status == "Pending" && !string.IsNullOrEmpty(order.MercadoPagoPreferenceId))
+        {
+            var accessToken = config["MercadoPago:AccessToken"];
+            if (!string.IsNullOrEmpty(accessToken))
+            {
+                var client = httpClientFactory.CreateClient();
+                using var req = new HttpRequestMessage(HttpMethod.Get, $"https://mercadopago.com{order.MercadoPagoPreferenceId}");
+                req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+
+                var res = await client.SendAsync(req);
+                if (res.IsSuccessStatusCode)
+                {
+                    var json = await res.Content.ReadAsStringAsync();
+                    using var doc = System.Text.Json.JsonDocument.Parse(json);
+                    var mpStatus = doc.RootElement.GetProperty("status").GetString();
+
+                    if (mpStatus is "processed" or "paid")
+                    {
+                        order.Status = "Approved";
+                        foreach (var item in order.Items)
+                        {
+                            var product = await _context.Products.FindAsync(item.ProductId);
+                            if (product is not null)
+                                product.Stock = Math.Max(0, product.Stock - item.Quantity);
+                        }
+                        await _context.SaveChangesAsync();
+                    }
+                }
+            }
+        }
 
         var itemDtos = order.Items.Select(i => new OrderItemDetailDto(
             i.ProductId,
@@ -215,4 +247,5 @@ public class OrdersController : ControllerBase
             itemDtos
         ));
     }
+
 }

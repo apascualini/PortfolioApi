@@ -174,7 +174,6 @@ public class CheckoutController : ControllerBase
         return Ok(new CheckoutResponse(order.Id, mpOrderId, checkoutUrl));
     }
 
-
     // POST: api/checkout/webhook
     [HttpPost("webhook")]
     public async Task<IActionResult> Webhook(
@@ -185,11 +184,11 @@ public class CheckoutController : ControllerBase
     {
         var accessToken = _config["MercadoPago:AccessToken"];
         if (string.IsNullOrEmpty(accessToken))
-            return StatusCode(500);
+            return Ok();
 
         using var reader = new StreamReader(Request.Body);
         var rawBody = await reader.ReadToEndAsync();
-        _logger.LogInformation("Webhook MP recibido. Query: {Query} | Body: {Body}", Request.QueryString, rawBody);
+        _logger.LogInformation("MP Webhook received | Query: {Query} | Body: {Body}", Request.QueryString, rawBody);
 
         string? eventType = type ?? topic;
         string? mpOrderId = dataId ?? id;
@@ -211,77 +210,97 @@ public class CheckoutController : ControllerBase
                     rootBody.TryGetProperty("data", out var d) &&
                     d.TryGetProperty("id", out var dId))
                 {
-                    mpOrderId = dId.GetString();
+                    mpOrderId = dId.ToString();
                 }
             }
-            catch { /* Ignorar si el body no es JSON */ }
-        }
-
-        if (eventType != "order" || string.IsNullOrWhiteSpace(mpOrderId))
-            return Ok();
-
-        await SyncOrderWithMercadoPago(mpOrderId, accessToken);
-        return Ok();
-    }
-
-    private async Task SyncOrderWithMercadoPago(string mpOrderId, string accessToken)
-    {
-        var client = _httpClientFactory.CreateClient();
-        using var getReq = new HttpRequestMessage(HttpMethod.Get, $"https://mercadopago.com{mpOrderId}");
-        getReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
-
-        var mpRes = await client.SendAsync(getReq);
-        var mpJson = await mpRes.Content.ReadAsStringAsync();
-
-        if (!mpRes.IsSuccessStatusCode)
-        {
-            _logger.LogWarning("Error consultando order {MpOrderId}: {Response}", mpOrderId, mpJson);
-            return;
-        }
-
-        using var doc = JsonDocument.Parse(mpJson);
-        var root = doc.RootElement;
-
-        var status = root.GetProperty("status").GetString();
-        var externalRef = root.TryGetProperty("external_reference", out var extProp) ? extProp.GetString() : null;
-
-        if (!int.TryParse(externalRef, out var orderId))
-            return;
-
-        await using var transaction = await _context.Database.BeginTransactionAsync();
-
-        var order = await _context.Orders
-            .Include(o => o.Items)
-            .FirstOrDefaultAsync(o => o.Id == orderId);
-
-        if (order is null || order.Status == "Approved")
-            return;
-
-        if (root.TryGetProperty("transactions", out var txProp) &&
-            txProp.TryGetProperty("payments", out var paymentsArr) &&
-            paymentsArr.ValueKind == JsonValueKind.Array &&
-            paymentsArr.GetArrayLength() > 0)
-        {
-            order.MercadoPagoPaymentId = paymentsArr[0].GetProperty("id").GetString();
-        }
-
-        if (status is "processed" or "paid")
-        {
-            order.Status = "Approved";
-            foreach (var item in order.Items)
+            catch
             {
-                var product = await _context.Products.FindAsync(item.ProductId);
-                if (product is not null)
-                    product.Stock = Math.Max(0, product.Stock - item.Quantity);
+                // Ignore non-JSON bodies during simulation
             }
         }
-        else if (status is "failed" or "canceled" or "expired")
-        {
-            order.Status = "Rejected";
-        }
 
-        await _context.SaveChangesAsync();
-        await transaction.CommitAsync();
+        // Always return 200 OK to Mercado Pago simulator/retries even if it's a dummy test ID
+        if (eventType != "order" || string.IsNullOrWhiteSpace(mpOrderId))
+            return Ok(new { received = true });
+
+        await SyncOrderStatusAsync(mpOrderId, accessToken);
+        return Ok(new { received = true });
     }
+
+    // Reusable helper: queries Mercado Pago directly and updates PostgreSQL + Stock
+    [NonAction]
+    public async Task SyncOrderStatusAsync(string mpOrderId, string accessToken)
+    {
+        try
+        {
+            var client = _httpClientFactory.CreateClient();
+            using var getReq = new HttpRequestMessage(HttpMethod.Get, $"https://mercadopago.com{mpOrderId}");
+            getReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+
+            var mpRes = await client.SendAsync(getReq);
+            if (!mpRes.IsSuccessStatusCode)
+            {
+                // Dummy IDs from MP's webhook simulator return 404 here—log and exit cleanly with 200 OK
+                _logger.LogWarning("MP Order {MpOrderId} not found or invalid ({StatusCode}).", mpOrderId, mpRes.StatusCode);
+                return;
+            }
+
+            var mpJson = await mpRes.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(mpJson);
+            var root = doc.RootElement;
+
+            var status = root.GetProperty("status").GetString();
+            var externalRef = root.TryGetProperty("external_reference", out var extProp)
+                ? extProp.GetString()
+                : null;
+
+            if (!int.TryParse(externalRef, out var orderId))
+                return;
+
+            await using var transaction = await _context.Database.BeginTransactionAsync();
+
+            var order = await _context.Orders
+                .Include(o => o.Items)
+                .FirstOrDefaultAsync(o => o.Id == orderId);
+
+            if (order is null || order.Status == "Approved")
+                return;
+
+            if (root.TryGetProperty("transactions", out var txProp) &&
+                txProp.TryGetProperty("payments", out var paymentsArr) &&
+                paymentsArr.ValueKind == JsonValueKind.Array &&
+                paymentsArr.GetArrayLength() > 0 &&
+                paymentsArr[0].TryGetProperty("id", out var payIdProp))
+            {
+                order.MercadoPagoPaymentId = payIdProp.ToString();
+            }
+
+            if (status is "processed" or "paid")
+            {
+                order.Status = "Approved";
+
+                foreach (var item in order.Items)
+                {
+                    var product = await _context.Products.FindAsync(item.ProductId);
+                    if (product is not null)
+                    {
+                        product.Stock = Math.Max(0, product.Stock - item.Quantity);
+                    }
+                }
+            }
+            else if (status is "failed" or "canceled" or "expired")
+            {
+                order.Status = "Rejected";
+            }
+
+            await _context.SaveChangesAsync();
+            await transaction.CommitAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error syncing MP Order {MpOrderId}", mpOrderId);
+        }
+    }
+
 
 }
