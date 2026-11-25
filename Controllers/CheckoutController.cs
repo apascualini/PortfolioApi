@@ -234,7 +234,10 @@ public class CheckoutController : ControllerBase
         try
         {
             var client = _httpClientFactory.CreateClient();
-            using var getReq = new HttpRequestMessage(HttpMethod.Get, $"https://mercadopago.com{mpOrderId}");
+
+            var mpOrderUrl = string.Concat("https://", "api.", "mercadopago.com", "/v1/orders/", mpOrderId);
+            using var getReq = new HttpRequestMessage(HttpMethod.Get, mpOrderUrl);
+
             getReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
 
             var mpRes = await client.SendAsync(getReq);
@@ -272,7 +275,7 @@ public class CheckoutController : ControllerBase
                 paymentsArr.GetArrayLength() > 0 &&
                 paymentsArr[0].TryGetProperty("id", out var payIdProp))
             {
-                order.MercadoPagoPaymentId = payIdProp.ToString();
+                order.MercadoPagoPaymentId = payIdProp.GetString();
             }
 
             if (status is "processed" or "paid")

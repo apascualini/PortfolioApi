@@ -206,7 +206,9 @@ public class OrdersController : ControllerBase
             if (!string.IsNullOrEmpty(accessToken))
             {
                 var client = httpClientFactory.CreateClient();
-                using var req = new HttpRequestMessage(HttpMethod.Get, $"https://mercadopago.com{order.MercadoPagoPreferenceId}");
+
+                var mpOrderUrl = string.Concat("https://", "api.", "mercadopago.com", "/v1/orders/", order.MercadoPagoPreferenceId);
+                using var req = new HttpRequestMessage(HttpMethod.Get, mpOrderUrl);
                 req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
 
                 var res = await client.SendAsync(req);
