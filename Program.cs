@@ -22,7 +22,7 @@ builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowFrontend", policy =>
     {
-        policy.WithOrigins("http://localhost:5173", "https://vercel.app", "https://portfolio-web-alpha-steel.vercel.app")
+        policy.WithOrigins("http://localhost:5173", "https://portfolio-web-alpha-steel.vercel.app")
               .AllowAnyHeader()
               .AllowAnyMethod()
               .AllowCredentials();
