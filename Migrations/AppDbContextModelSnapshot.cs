@@ -78,6 +78,58 @@ namespace PortfolioApi.Migrations
                     b.ToTable("Categories");
                 });
 
+            modelBuilder.Entity("PortfolioApi.Models.Customer", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("DniOrCuit")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Email")
+                        .IsRequired()
+                        .HasMaxLength(150)
+                        .HasColumnType("character varying(150)");
+
+                    b.Property<string>("FullName")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("GoogleSubjectId")
+                        .HasColumnType("text");
+
+                    b.Property<bool>("IsEmailVerified")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("OtpCodeHash")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime?>("OtpExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Phone")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("TaxCondition")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Email")
+                        .IsUnique();
+
+                    b.ToTable("Customers");
+                });
+
             modelBuilder.Entity("PortfolioApi.Models.Order", b =>
                 {
                     b.Property<int>("Id")
@@ -100,6 +152,9 @@ namespace PortfolioApi.Migrations
                     b.Property<string>("CustomerFullName")
                         .IsRequired()
                         .HasColumnType("text");
+
+                    b.Property<int?>("CustomerId")
+                        .HasColumnType("integer");
 
                     b.Property<string>("CustomerPhone")
                         .IsRequired()
@@ -153,6 +208,8 @@ namespace PortfolioApi.Migrations
                         .HasColumnType("decimal(18,2)");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("CustomerId");
 
                     b.HasIndex("MercadoPagoPreferenceId");
 
@@ -229,6 +286,15 @@ namespace PortfolioApi.Migrations
                     b.ToTable("Products");
                 });
 
+            modelBuilder.Entity("PortfolioApi.Models.Order", b =>
+                {
+                    b.HasOne("PortfolioApi.Models.Customer", "Customer")
+                        .WithMany("Orders")
+                        .HasForeignKey("CustomerId");
+
+                    b.Navigation("Customer");
+                });
+
             modelBuilder.Entity("PortfolioApi.Models.OrderItem", b =>
                 {
                     b.HasOne("PortfolioApi.Models.Order", "Order")
@@ -262,6 +328,11 @@ namespace PortfolioApi.Migrations
             modelBuilder.Entity("PortfolioApi.Models.Category", b =>
                 {
                     b.Navigation("Products");
+                });
+
+            modelBuilder.Entity("PortfolioApi.Models.Customer", b =>
+                {
+                    b.Navigation("Orders");
                 });
 
             modelBuilder.Entity("PortfolioApi.Models.Order", b =>

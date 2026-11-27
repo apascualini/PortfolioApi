@@ -1,7 +1,9 @@
 using System.Globalization;
 using System.Net.Http.Headers;
+using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using PortfolioApi.Data;
@@ -32,9 +34,15 @@ public class CheckoutController : ControllerBase
     }
 
     // POST: api/checkout
+    [Authorize(Roles = "Customer")]
     [HttpPost]
     public async Task<ActionResult<CheckoutResponse>> CreateOrder(CreateCheckoutRequest request)
     {
+        var customerIdStr = User.FindFirstValue(System.Security.Claims.ClaimTypes.NameIdentifier);
+        var verifiedEmail = User.FindFirstValue(System.Security.Claims.ClaimTypes.Email);
+        int.TryParse(customerIdStr, out var customerId);
+
+
         var accessToken = _config["MercadoPago:AccessToken"]
             ?? throw new InvalidOperationException("MercadoPago:AccessToken is missing.");
 
@@ -92,7 +100,6 @@ public class CheckoutController : ControllerBase
         var order = new Order
         {
             CustomerFullName = request.CustomerFullName.Trim(),
-            CustomerEmail = request.CustomerEmail.Trim().ToLowerInvariant(),
             CustomerPhone = request.CustomerPhone.Trim(),
             DniOrCuit = request.DniOrCuit.Trim(),
             TaxCondition = request.TaxCondition.Trim(),
@@ -106,7 +113,9 @@ public class CheckoutController : ControllerBase
             TotalAmount = totalAmount,
             PaymentMethod = "MercadoPago",
             Status = "Pending",
-            Items = orderItems
+            Items = orderItems,
+            CustomerId = customerId > 0 ? customerId : null,
+            CustomerEmail = verifiedEmail ?? request.CustomerEmail.Trim().ToLowerInvariant(),
         };
 
         _context.Orders.Add(order);

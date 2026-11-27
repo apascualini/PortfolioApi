@@ -16,6 +16,8 @@ public class AppDbContext : DbContext
 
     public DbSet<AdminUser> AdminUsers => Set<AdminUser>();
 
+    public DbSet<Customer> Customers => Set<Customer>();
+
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -32,6 +34,9 @@ public class AppDbContext : DbContext
             .HasIndex(u => u.Email)
             .IsUnique();
 
+        modelBuilder.Entity<Customer>()
+            .HasIndex(c => c.Email)
+            .IsUnique();
     }
 
 }

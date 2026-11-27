@@ -53,10 +53,11 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         {
             OnMessageReceived = context =>
             {
-                if (context.Request.Cookies.TryGetValue("admin_token", out var token))
-                {
-                    context.Token = token;
-                }
+                if (context.Request.Cookies.TryGetValue("admin_token", out var adminToken))
+                    context.Token = adminToken;
+                else if (context.Request.Cookies.TryGetValue("customer_token", out var customerToken))
+                    context.Token = customerToken;
+
                 return Task.CompletedTask;
             }
         };
