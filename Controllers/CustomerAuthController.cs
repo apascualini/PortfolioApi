@@ -12,6 +12,8 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using PortfolioApi.Data;
 using PortfolioApi.Models;
+using System.Net;
+using System.Net.Mail;
 
 namespace PortfolioApi.Controllers;
 
@@ -117,36 +119,53 @@ public class CustomerAuthController : ControllerBase
         customer.OtpExpiresAt = DateTime.UtcNow.AddMinutes(10);
         await _context.SaveChangesAsync();
 
-        // Enviar email vía Resend API
-        var resendKey = _config["Resend:ApiKey"];
-        var fromEmail = _config["Resend:FromEmail"] ?? "onboarding@resend.dev";
+         // Enviar email vía Gmail SMTP gratuito
+        var smtpEmail = _config["Smtp:Email"];
+        var smtpPassword = _config["Smtp:Password"];
+        var storeName = _config["Smtp:FromName"] ?? "Mi Tienda";
 
-        if (!string.IsNullOrEmpty(resendKey))
+        if (!string.IsNullOrEmpty(smtpEmail) && !string.IsNullOrEmpty(smtpPassword))
         {
-            var client = _httpClientFactory.CreateClient();
-            var url = string.Concat("https://", "api.", "resend.com", "/emails");
-            using var req = new HttpRequestMessage(HttpMethod.Post, url);
-            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", resendKey);
-            req.Content = new StringContent(JsonSerializer.Serialize(new
+            try
             {
-                from = fromEmail,
-                to = new[] { email },
-                subject = $"Tu código de acceso: {code}",
-                html = $"<p>Hola <strong>{customer.FullName}</strong>,</p><p>Tu código de verificación para ingresar a la tienda es:</p><h2 style='letter-spacing:4px;'>{code}</h2><p>Vence en 10 minutos.</p>"
-            }), Encoding.UTF8, "application/json");
+                // Concatenamos el host para evitar recortes al copiar y pegar
+                var smtpHost = string.Concat("smtp.", "gmail.com");
 
-            var res = await client.SendAsync(req);
-            if (!res.IsSuccessStatusCode)
+                using var smtp = new SmtpClient(smtpHost, 587)
+                {
+                    Credentials = new NetworkCredential(smtpEmail, smtpPassword),
+                    EnableSsl = true
+                };
+
+                using var mail = new MailMessage
+                {
+                    From = new MailAddress(smtpEmail, storeName),
+                    Subject = $"Tu código de acceso: {code}",
+                    Body = $@"
+                        <div style='font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px;'>
+                            <h2 style='color: #0f172a; margin-top: 0;'>Código de verificación</h2>
+                            <p style='color: #475569;'>Hola <strong>{customer.FullName}</strong>,</p>
+                            <p style='color: #475569;'>Ingresá este código para continuar con tu compra:</p>
+                            <div style='background: #f1f5f9; padding: 16px; text-align: center; border-radius: 8px; margin: 20px 0;'>
+                                <span style='font-size: 28px; font-weight: bold; letter-spacing: 6px; color: #4f46e5;'>{code}</span>
+                            </div>
+                            <p style='font-size: 12px; color: #94a3b8;'>Este código vence en 10 minutos. Si no solicitaste este ingreso, ignorá este correo.</p>
+                        </div>",
+                    IsBodyHtml = true
+                };
+                mail.To.Add(email);
+
+                await smtp.SendMailAsync(mail);
+            }
+            catch (Exception ex)
             {
-                var err = await res.Content.ReadAsStringAsync();
-                _logger.LogError("Error enviando OTP con Resend: {Error}", err);
+                _logger.LogError(ex, "Error enviando OTP vía Gmail SMTP a {Email}", email);
                 return StatusCode(502, new { message = "No se pudo enviar el correo de verificación." });
             }
         }
         else
         {
-            // En desarrollo local sin Resend configurado, lo logueamos en consola
-            _logger.LogWarning("OTP generado para {Email} (sin Resend configurado): {Code}", email, code);
+            _logger.LogWarning("OTP generado para {Email} (sin SMTP configurado): {Code}", email, code);
         }
 
         return Ok(new { message = "Código enviado a tu correo electrónico." });
